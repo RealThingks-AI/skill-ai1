@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { projectService } from '../../services/projectService';
 import { AllocationHistory } from '../../types/projects';
-import { Loader2, TrendingUp, TrendingDown, User, Clock, ArrowRight, UserPlus, UserMinus, Edit, RefreshCw, Eye, X, Calendar, FileText, Activity } from 'lucide-react';
+import { Loader2, TrendingUp, TrendingDown, User, Clock, ArrowRight, UserPlus, UserMinus, Edit, RefreshCw, Eye, X, Calendar, FileText, Activity, Settings } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -14,6 +14,71 @@ interface ProjectHistoryTabProps {
   isEmployeeView?: boolean;
 }
 
+// Parse change details from change_reason to extract old/new values
+interface ChangeDetail {
+  field: string;
+  oldValue: string | null;
+  newValue: string | null;
+}
+
+function parseChangeDetails(changeReason: string | undefined): ChangeDetail[] {
+  if (!changeReason) return [];
+  
+  const details: ChangeDetail[] = [];
+  
+  // Pattern: "End Date: 2025-08-31 → 2025-09-30"
+  // Pattern: "Manpower (Sep-2025): Not set → 5"
+  // Pattern: "field: old_value → new_value"
+  const fieldPatterns = [
+    /End Date:\s*([^\s→]+)\s*→\s*([^\s,;]+)/gi,
+    /Start Date:\s*([^\s→]+)\s*→\s*([^\s,;]+)/gi,
+    /Manpower\s*\(([^)]+)\):\s*([^\s→]+)\s*→\s*([^\s,;]+)/gi,
+    /Name:\s*(.+?)\s*→\s*(.+?)(?:,|;|$)/gi,
+    /Description:\s*(.+?)\s*→\s*(.+?)(?:,|;|$)/gi,
+    /Customer:\s*(.+?)\s*→\s*(.+?)(?:,|;|$)/gi,
+    /Tech Lead:\s*(.+?)\s*→\s*(.+?)(?:,|;|$)/gi,
+  ];
+
+  // Try each pattern
+  for (const pattern of fieldPatterns) {
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(changeReason)) !== null) {
+      if (pattern.source.includes('Manpower')) {
+        // Manpower has 3 groups: month, old, new
+        details.push({
+          field: `Manpower (${match[1]})`,
+          oldValue: match[2] === 'Not set' ? null : match[2],
+          newValue: match[3] === 'Not set' ? null : match[3]
+        });
+      } else {
+        const fieldName = pattern.source.match(/^([^:]+):/)?.[1] || 'Field';
+        details.push({
+          field: fieldName.replace(/\\/g, ''),
+          oldValue: match[1] === 'Not set' || match[1] === 'null' ? null : match[1],
+          newValue: match[2] === 'Not set' || match[2] === 'null' ? null : match[2]
+        });
+      }
+    }
+  }
+
+  return details;
+}
+
+// Determine if this is a project field update vs member allocation change
+function isProjectFieldUpdate(entry: AllocationHistory): boolean {
+  const reason = entry.change_reason?.toLowerCase() || '';
+  return (
+    reason.includes('end date') ||
+    reason.includes('start date') ||
+    reason.includes('manpower') ||
+    reason.includes('fields updated') ||
+    reason.includes('project updated') ||
+    reason.includes('sent back for approval') ||
+    reason.includes('pending changes')
+  );
+}
+
 // Helper to determine action type from change_reason
 function getActionInfo(entry: AllocationHistory): { 
   icon: React.ReactNode; 
@@ -22,6 +87,16 @@ function getActionInfo(entry: AllocationHistory): {
   color: string;
 } {
   const reason = entry.change_reason?.toLowerCase() || '';
+  
+  // Check if this is a project field update first
+  if (isProjectFieldUpdate(entry)) {
+    return { 
+      icon: <Settings className="h-4 w-4" />, 
+      label: 'Project Updated', 
+      variant: 'secondary',
+      color: 'text-blue-600'
+    };
+  }
   
   if (reason.includes('new member assigned') || entry.previous_allocation === null) {
     return { 
@@ -32,7 +107,7 @@ function getActionInfo(entry: AllocationHistory): {
     };
   }
   
-  if (reason.includes('removed') || entry.new_allocation === 0) {
+  if (reason.includes('removed') || (entry.new_allocation === 0 && !isProjectFieldUpdate(entry))) {
     return { 
       icon: <UserMinus className="h-4 w-4" />, 
       label: 'Member Removed', 
@@ -41,7 +116,7 @@ function getActionInfo(entry: AllocationHistory): {
     };
   }
   
-  if (reason.includes('updated') || reason.includes('sent back')) {
+  if (reason.includes('updated')) {
     return { 
       icon: <Edit className="h-4 w-4" />, 
       label: 'Update', 
@@ -101,10 +176,12 @@ function HistoryDetailModal({
   const actionInfo = getActionInfo(entry);
   const isIncrease = entry.previous_allocation !== null && entry.new_allocation > entry.previous_allocation;
   const isDecrease = entry.previous_allocation !== null && entry.new_allocation < entry.previous_allocation;
+  const isProjectUpdate = isProjectFieldUpdate(entry);
+  const changeDetails = parseChangeDetails(entry.change_reason);
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Activity className="h-5 w-5" />
@@ -126,72 +203,102 @@ function HistoryDetailModal({
 
           <Separator />
 
-          {/* Member Info */}
-          <div className="space-y-3">
-            <div className="flex items-start gap-3">
-              <User className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
-              <div className="min-w-0">
-                <p className="text-xs text-muted-foreground">Member</p>
-                <p className="font-medium">{entry.full_name}</p>
+          {/* Change Details - Old vs New Values */}
+          {changeDetails.length > 0 && (
+            <div className="space-y-3">
+              <p className="text-sm font-medium flex items-center gap-2">
+                <FileText className="h-4 w-4 text-muted-foreground" />
+                Changes Made
+              </p>
+              <div className="space-y-2 bg-muted/30 rounded-lg p-3">
+                {changeDetails.map((detail, idx) => (
+                  <div key={idx} className="flex flex-col gap-1 pb-2 border-b border-border/50 last:border-0 last:pb-0">
+                    <span className="text-xs font-medium text-muted-foreground">{detail.field}</span>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Badge variant="outline" className="text-muted-foreground line-through bg-destructive/10">
+                        {detail.oldValue || 'Not set'}
+                      </Badge>
+                      <ArrowRight className="h-3 w-3 text-muted-foreground shrink-0" />
+                      <Badge variant="default" className="bg-green-600">
+                        {detail.newValue || 'Not set'}
+                      </Badge>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
+          )}
 
-            {/* Allocation Change */}
-            {(entry.new_allocation > 0 || entry.previous_allocation !== null) && (
+          {/* Member Info - only show for member-related changes */}
+          {!isProjectUpdate && (
+            <div className="space-y-3">
               <div className="flex items-start gap-3">
-                <Activity className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+                <User className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
                 <div className="min-w-0">
-                  <p className="text-xs text-muted-foreground">Allocation</p>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    {entry.previous_allocation !== null && (
-                      <>
-                        <Badge variant="outline" className="text-muted-foreground">
-                          {entry.previous_allocation}%
+                  <p className="text-xs text-muted-foreground">Member</p>
+                  <p className="font-medium">{entry.full_name}</p>
+                </div>
+              </div>
+
+              {/* Allocation Change */}
+              {(entry.new_allocation > 0 || entry.previous_allocation !== null) && (
+                <div className="flex items-start gap-3">
+                  <Activity className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-xs text-muted-foreground">Allocation</p>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      {entry.previous_allocation !== null && (
+                        <>
+                          <Badge variant="outline" className="text-muted-foreground">
+                            {entry.previous_allocation}%
+                          </Badge>
+                          <ArrowRight className="h-4 w-4 text-muted-foreground" />
+                        </>
+                      )}
+                      {entry.new_allocation > 0 ? (
+                        <Badge variant={isIncrease ? 'default' : isDecrease ? 'secondary' : 'outline'}>
+                          {isIncrease && <TrendingUp className="h-3 w-3 mr-1" />}
+                          {isDecrease && <TrendingDown className="h-3 w-3 mr-1" />}
+                          {entry.new_allocation}%
                         </Badge>
-                        <ArrowRight className="h-4 w-4 text-muted-foreground" />
-                      </>
-                    )}
-                    {entry.new_allocation > 0 ? (
-                      <Badge variant={isIncrease ? 'default' : isDecrease ? 'secondary' : 'outline'}>
-                        {isIncrease && <TrendingUp className="h-3 w-3 mr-1" />}
-                        {isDecrease && <TrendingDown className="h-3 w-3 mr-1" />}
-                        {entry.new_allocation}%
-                      </Badge>
-                    ) : (
-                      <Badge variant="destructive">Removed (0%)</Badge>
-                    )}
+                      ) : (
+                        <Badge variant="destructive">Removed (0%)</Badge>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
+          )}
 
-            {/* Change Reason/Description */}
-            {entry.change_reason && (
-              <div className="flex items-start gap-3">
-                <FileText className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
-                <div className="min-w-0">
-                  <p className="text-xs text-muted-foreground">Description</p>
-                  <p className="text-sm mt-0.5">{entry.change_reason}</p>
-                </div>
-              </div>
-            )}
-
-            {/* Changed By */}
+          {/* Change Reason/Description */}
+          {entry.change_reason && (
             <div className="flex items-start gap-3">
-              <User className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
-              <div className="min-w-0">
-                <p className="text-xs text-muted-foreground">Changed By</p>
-                <p className="font-medium">{entry.changed_by_name}</p>
+              <FileText className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs text-muted-foreground">Full Description</p>
+                <p className="text-sm mt-0.5 whitespace-pre-wrap break-words">{entry.change_reason}</p>
               </div>
             </div>
+          )}
 
-            {/* Date & Time */}
-            <div className="flex items-start gap-3">
-              <Calendar className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
-              <div className="min-w-0">
-                <p className="text-xs text-muted-foreground">Date & Time</p>
-                <p className="text-sm">{formatFullDate(entry.created_at)}</p>
-              </div>
+          <Separator />
+
+          {/* Changed By */}
+          <div className="flex items-start gap-3">
+            <User className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+            <div className="min-w-0">
+              <p className="text-xs text-muted-foreground">Changed By</p>
+              <p className="font-medium">{entry.changed_by_name}</p>
+            </div>
+          </div>
+
+          {/* Date & Time */}
+          <div className="flex items-start gap-3">
+            <Calendar className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+            <div className="min-w-0">
+              <p className="text-xs text-muted-foreground">Date & Time</p>
+              <p className="text-sm">{formatFullDate(entry.created_at)}</p>
             </div>
           </div>
 
@@ -254,23 +361,32 @@ export default function ProjectHistoryTab({ projectId, isEmployeeView = false }:
         <div className="space-y-2">
           {history.map((entry) => {
             const actionInfo = getActionInfo(entry);
+            const isProjectUpdate = isProjectFieldUpdate(entry);
+            const changeDetails = parseChangeDetails(entry.change_reason);
             const isIncrease = entry.previous_allocation !== null && entry.new_allocation > entry.previous_allocation;
             const isDecrease = entry.previous_allocation !== null && entry.new_allocation < entry.previous_allocation;
-            const showAllocation = entry.new_allocation > 0 || entry.previous_allocation !== null;
+            const showAllocation = !isProjectUpdate && (entry.new_allocation > 0 || entry.previous_allocation !== null);
 
             return (
               <div 
                 key={entry.id} 
                 className="p-3 border rounded-lg bg-card hover:bg-accent/5 transition-colors"
               >
-                {/* Top row: Action badge + Member name + Allocation + View Details */}
+                {/* Top row: Action badge + Context + View Details */}
                 <div className="flex items-center justify-between gap-2 mb-1.5">
                   <div className="flex items-center gap-2 min-w-0 flex-1">
                     <Badge variant={actionInfo.variant} className="shrink-0 gap-1 text-xs">
                       {actionInfo.icon}
                       {actionInfo.label}
                     </Badge>
-                    <span className="font-medium truncate">{entry.full_name}</span>
+                    {!isProjectUpdate && (
+                      <span className="font-medium truncate">{entry.full_name}</span>
+                    )}
+                    {isProjectUpdate && changeDetails.length > 0 && (
+                      <span className="text-xs text-muted-foreground">
+                        ({changeDetails.length} field{changeDetails.length > 1 ? 's' : ''} updated)
+                      </span>
+                    )}
                   </div>
                   
                   <div className="flex items-center gap-2 shrink-0">
@@ -305,8 +421,25 @@ export default function ProjectHistoryTab({ projectId, isEmployeeView = false }:
                   </div>
                 </div>
 
-                {/* Middle row: Change reason/description */}
-                {entry.change_reason && (
+                {/* Show quick preview of changes for project updates */}
+                {isProjectUpdate && changeDetails.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mb-1.5">
+                    {changeDetails.slice(0, 2).map((detail, idx) => (
+                      <div key={idx} className="flex items-center gap-1 text-xs">
+                        <span className="text-muted-foreground">{detail.field}:</span>
+                        <span className="line-through text-muted-foreground">{detail.oldValue || 'Not set'}</span>
+                        <ArrowRight className="h-2.5 w-2.5 text-muted-foreground" />
+                        <span className="font-medium text-foreground">{detail.newValue || 'Not set'}</span>
+                      </div>
+                    ))}
+                    {changeDetails.length > 2 && (
+                      <span className="text-xs text-muted-foreground">+{changeDetails.length - 2} more</span>
+                    )}
+                  </div>
+                )}
+
+                {/* Middle row: Change reason/description (only if no parsed details) */}
+                {entry.change_reason && changeDetails.length === 0 && (
                   <p className="text-sm text-muted-foreground mb-1.5 line-clamp-1">
                     {entry.change_reason}
                   </p>
@@ -338,4 +471,3 @@ export default function ProjectHistoryTab({ projectId, isEmployeeView = false }:
     </div>
   );
 }
-
