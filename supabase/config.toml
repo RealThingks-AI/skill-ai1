@@ -1,0 +1,19 @@
+project_id = "qfdmfaznsoghazcigluw"
+
+[functions.auto-backup]
+verify_jwt = false
+
+[functions.backup-export]
+verify_jwt = true
+
+[functions.backup-import]
+verify_jwt = true
+
+[functions.sync-missing-profiles]
+verify_jwt = true
+
+[functions.user-management]
+verify_jwt = true
+
+[functions.user-management-v2]
+verify_jwt = true
